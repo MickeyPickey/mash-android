@@ -714,14 +714,15 @@ scan_addons() {
   # `-print0` / `read -d ''` for paths with whitespace, even though `.toc`
   # files in the wild never contain newlines.
   local toc_path reldir base iface
-  while IFS= read -r -d '' toc_path; do
-    iface="$(toc_interface "$toc_path")"
-    if [[ "$iface" == "$want_version" ]]; then
-      reldir="$(dirname "${toc_path#"$clone_dir"/}")"
-      base="$(basename "$toc_path" .toc)"
-      printf '%s\t%s\n' "$reldir" "$base" >>"$tocs_file"
-    fi
-  done < <(find "$clone_dir" -type f -name '*.toc' ! -path '*/.git/*' -print0)
+  find "$clone_dir" -type f -name '*.toc' ! -path '*/.git/*' -print0 |
+    while IFS= read -r -d '' toc_path; do
+      iface="$(toc_interface "$toc_path")"
+      if [[ "$iface" == "$want_version" ]]; then
+        reldir="$(dirname "${toc_path#"$clone_dir"/}")"
+        base="$(basename "$toc_path" .toc)"
+        printf '%s\t%s\n' "$reldir" "$base" >>"$tocs_file"
+      fi
+    done
 
   if [[ ! -s "$tocs_file" ]]; then
     return 0
@@ -802,13 +803,14 @@ fmt_ref_display() {
 scan_addons_unfiltered() {
   local clone_dir="$1"
   local toc_path reldir base iface
-  while IFS= read -r -d '' toc_path; do
-    iface="$(toc_interface "$toc_path")"
-    [[ -z "$iface" ]] && iface="?"
-    reldir="$(dirname "${toc_path#"$clone_dir"/}")"
-    base="$(basename "$toc_path" .toc)"
-    printf '%s\t%s\t%s\n' "$reldir" "$base" "$iface"
-  done < <(find "$clone_dir" -type f -name '*.toc' ! -path '*/.git/*' -print0) |
+  find "$clone_dir" -type f -name '*.toc' ! -path '*/.git/*' -print0 |
+    while IFS= read -r -d '' toc_path; do
+      iface="$(toc_interface "$toc_path")"
+      [[ -z "$iface" ]] && iface="?"
+      reldir="$(dirname "${toc_path#"$clone_dir"/}")"
+      base="$(basename "$toc_path" .toc)"
+      printf '%s\t%s\t%s\n' "$reldir" "$base" "$iface"
+    done |
     sort
 }
 
@@ -1065,6 +1067,30 @@ detect_target_conflict() {
   return 0
 }
 
+# Copies an addon directory tree into the target location.
+# Uses tar streaming when available to handle case-insensitive filesystems
+# (e.g. Android emulated storage) where repositories contain directory names
+# differing only in case (e.g. Modules/ and modules/), which causes cp to fail.
+copy_addon_directory() {
+  local source="$1"
+  local target="$2"
+  rm -rf "$target"
+  if command -v tar >/dev/null 2>&1; then
+    mkdir -p "$target" || return 1
+    if (cd "$source" && tar -cf - .) 2>/dev/null | (cd "$target" && tar -xf -) 2>/dev/null; then
+      printf '%s\n' "$source" >"$target/.mash_managed"
+      return 0
+    fi
+    rm -rf "$target"
+  fi
+  if cp -r "$source" "$target"; then
+    printf '%s\n' "$source" >"$target/.mash_managed"
+    return 0
+  fi
+  rm -rf "$target"
+  return 1
+}
+
 # Creates or replaces an addon target. Tries symlink first; falls back to copying
 # directory when symlinks are not supported (e.g. Android emulated storage).
 install_symlink_safe() {
@@ -1076,12 +1102,7 @@ install_symlink_safe() {
   if ln -sfn "$source" "$target" 2>/dev/null; then
     return 0
   fi
-  rm -rf "$target"
-  if cp -r "$source" "$target"; then
-    printf '%s\n' "$source" >"$target/.mash_managed"
-    return 0
-  fi
-  return 1
+  copy_addon_directory "$source" "$target"
 }
 
 # Synchronizes copied addons from clone directory if they are not symlinks.
@@ -1099,9 +1120,7 @@ sync_repo_addons_if_copied() {
     s_path="$(addon_source_path "$clone_dir" "$addon_reldir")"
     t_path="$addons_dir/$addon_name"
     if [[ ! -L "$t_path" && -d "$t_path" && -f "$t_path/.mash_managed" ]]; then
-      rm -rf "$t_path"
-      cp -r "$s_path" "$t_path"
-      printf '%s\n' "$s_path" >"$t_path/.mash_managed"
+      copy_addon_directory "$s_path" "$t_path"
     fi
   done < <(read_repo_addons "$section")
 }
@@ -1472,6 +1491,7 @@ cmd_add() {
   done
   if [[ "$install_failed" -eq 1 ]]; then
     local rb
+    rm -rf "${chosen_targets[$i]}"
     if [[ ${#installed[@]} -gt 0 ]]; then
       for rb in "${installed[@]}"; do
         rm -rf "$rb"
