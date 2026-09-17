@@ -31,6 +31,9 @@ mash offers a range of features that simplify managing WoW addons:
   broken or when newer commits target different interface versions.
 - __Batch installation__: add many repositories at once from a list file or
   from stdin (for piping from `curl` and similar).
+- __Android & non-symlink filesystem support__: automatically falls back to
+  copying addon directories if the client filesystem does not support symbolic
+  links (e.g., Android `/storage/emulated/0` or FAT/exFAT).
 
 ## Table of contents
 
@@ -103,11 +106,11 @@ name `mserajnik/mash/mash` then installs mash from that tap, and
 ### Manual
 
 Clone the repository and symlink the script into a directory on your `$PATH`
-(`~/.local/bin` is a common choice; substitute another directory if it is not
-on your `$PATH`):
+(`~/.local/bin` is a common choice; on Android/Termux, `$PREFIX/bin` can be
+used; substitute another directory if it is not on your `$PATH`):
 
 ```sh
-git clone https://github.com/mserajnik/mash ~/mash
+git clone https://github.com/MickeyPickey/mash-android ~/mash
 ln -s ~/mash/bin/mash ~/.local/bin/mash
 ```
 
@@ -129,7 +132,8 @@ declares which client version the addon targets.
 Any Git repository that contains one or more such directories is, in mash's
 terminology, an _addon repository_. mash clones the repository, finds the
 `.toc` files whose interface version matches your configured one, and symlinks
-the matching addon directories into `Interface/AddOns/`.
+the matching addon directories into `Interface/AddOns/` (or copies them if the
+filesystem does not support symbolic links).
 
 In flag names and messages you will see `.toc` referenced explicitly (for
 example, `--toc`, "multiple matching `.toc` files") because that is what mash
@@ -338,8 +342,9 @@ DennisWG/BetterAlign (pinned: 8840ee2).
 mash remove shagu/pfQuest
 ```
 
-`mash remove` removes the repository and deletes the symlinks mash created for
-its addons. Addons that are not managed by mash are left alone.
+`mash remove` removes the repository and deletes the symlinks or copied
+directories mash created for its addons. Addons that are not managed by mash
+are left alone.
 
 ### Global flags
 
@@ -396,7 +401,9 @@ The active profile is tracked in a single-line state file at
 
 ## Maintainer
 
-[Michael Serajnik][maintainer]
+This Android-compatible fork is maintained by
+[MickeyPickey](https://github.com/MickeyPickey), forked from [Michael
+Serajnik](https://github.com/mserajnik)'s [original project][upstream-repo].
 
 ## Contribute
 
@@ -418,15 +425,16 @@ This project follows the [REUSE specification][reuse-spec].
     addon manager for a 20+ year-old game.
 
 [addon-pfquest]: https://github.com/shagu/pfquest
-[badge-lint-status]: https://github.com/mserajnik/mash/actions/workflows/lint.yaml/badge.svg
-[badge-lint-status-url]: https://github.com/mserajnik/mash/actions/workflows/lint.yaml
+[badge-lint-status]: https://github.com/MickeyPickey/mash-android/actions/workflows/lint.yaml/badge.svg
+[badge-lint-status-url]: https://github.com/MickeyPickey/mash-android/actions/workflows/lint.yaml
 [homebrew-bundle]: https://docs.brew.sh/Brew-Bundle-and-Brewfile
 [homebrew-tap-trust]: https://docs.brew.sh/Tap-Trust
-[issues]: https://github.com/mserajnik/mash/issues
+[issues]: https://github.com/MickeyPickey/mash-android/issues
 [license-agpl-3.0-or-later]: LICENSES/AGPL-3.0-or-later.txt
 [license-cc-by-sa-4.0]: LICENSES/CC-BY-SA-4.0.txt
 [license-cc0-1.0]: LICENSES/CC0-1.0.txt
 [maintainer]: https://github.com/mserajnik
 [pass]: https://www.passwordstore.org/
-[pull-requests]: https://github.com/mserajnik/mash/pulls
+[pull-requests]: https://github.com/MickeyPickey/mash-android/pulls
 [reuse-spec]: https://reuse.software/spec/
+[upstream-repo]: https://github.com/mserajnik/mash
