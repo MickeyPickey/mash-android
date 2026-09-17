@@ -340,7 +340,7 @@ drop_managed_symlinks() {
       [[ -z "$addon_name" ]] && continue
       target="$addons_dir/$addon_name"
       if is_mash_symlink "$target"; then
-        rm -f "$target"
+        rm -rf "$target"
       fi
     done < <(read_repo_addons "$section")
   done <<<"$repos"
@@ -981,17 +981,23 @@ load_repo_config() {
 }
 
 # Returns 0 if `target` is a symlink whose resolved path lives inside the data
-# directory (so it was created by mash and is safe to replace).
+# directory or a directory marked with .mash_managed (safe to replace).
 is_mash_symlink() {
   local target="$1"
-  [[ -L "$target" ]] || return 1
-  local link
-  link="$(readlink "$target")"
-  # Make absolute if relative.
-  if [[ "$link" != /* ]]; then
-    link="$(dirname "$target")/$link"
+  if [[ -L "$target" ]]; then
+    local link
+    link="$(readlink "$target")"
+    # Make absolute if relative.
+    if [[ "$link" != /* ]]; then
+      link="$(dirname "$target")/$link"
+    fi
+    [[ "$link" == "$DATA_DIR"/* ]]
+    return $?
   fi
-  [[ "$link" == "$DATA_DIR"/* ]]
+  if [[ -d "$target" && -f "$target/.mash_managed" ]]; then
+    return 0
+  fi
+  return 1
 }
 
 # Echoes the clone directory for `<name>` and returns 0 if the clone is on
@@ -1059,16 +1065,45 @@ detect_target_conflict() {
   return 0
 }
 
-# Creates or replaces a symlink. Returns non-zero if the target exists but is
-# not a mash-managed symlink (callers are expected to check for that case
-# beforehand).
+# Creates or replaces an addon target. Tries symlink first; falls back to copying
+# directory when symlinks are not supported (e.g. Android emulated storage).
 install_symlink_safe() {
   local source="$1"
   local target="$2"
   if [[ -e "$target" || -L "$target" ]] && ! is_mash_symlink "$target"; then
     return 1
   fi
-  ln -sfn "$source" "$target"
+  if ln -sfn "$source" "$target" 2>/dev/null; then
+    return 0
+  fi
+  rm -rf "$target"
+  if cp -r "$source" "$target"; then
+    printf '%s\n' "$source" >"$target/.mash_managed"
+    return 0
+  fi
+  return 1
+}
+
+# Synchronizes copied addons from clone directory if they are not symlinks.
+sync_repo_addons_if_copied() {
+  local repo_name="$1"
+  local section="repo:$repo_name"
+  local clone_dir
+  clone_dir="$(clone_path "$repo_name")"
+  local client_dir addons_dir
+  client_dir="$(config_get_required main client_dir)"
+  addons_dir="$client_dir/Interface/AddOns"
+  local addon_name addon_reldir s_path t_path
+  while IFS=$'\t' read -r addon_name addon_reldir; do
+    [[ -z "$addon_name" ]] && continue
+    s_path="$(addon_source_path "$clone_dir" "$addon_reldir")"
+    t_path="$addons_dir/$addon_name"
+    if [[ ! -L "$t_path" && -d "$t_path" && -f "$t_path/.mash_managed" ]]; then
+      rm -rf "$t_path"
+      cp -r "$s_path" "$t_path"
+      printf '%s\n' "$s_path" >"$t_path/.mash_managed"
+    fi
+  done < <(read_repo_addons "$section")
 }
 
 # Prompts the user for the client's TOC interface version
@@ -1439,7 +1474,7 @@ cmd_add() {
     local rb
     if [[ ${#installed[@]} -gt 0 ]]; then
       for rb in "${installed[@]}"; do
-        rm -f "$rb"
+        rm -rf "$rb"
       done
     fi
     rm -rf "$clone_dir"
@@ -1599,6 +1634,7 @@ cmd_pin() {
   fi
 
   config_update_repo_metadata "$name" "$url" "$new_sha" commit true
+  sync_repo_addons_if_copied "$name"
 
   log_info "$(c_status Pinned) $(c_repo "$name") ($(c_dim "$new_sha"))."
 }
@@ -1648,6 +1684,7 @@ cmd_unpin() {
   new_sha="$(git_short_head "$clone_dir")"
 
   config_update_repo_metadata "$name" "$url" "$target_ref" "$target_kind" false
+  sync_repo_addons_if_copied "$name"
 
   log_info "$(c_status Unpinned) $(c_repo "$name") ($target_kind: $(c_dim "$target_ref"), $(c_dim "$new_sha"))."
 }
@@ -1804,6 +1841,8 @@ update_one_repo() (
   if [[ "$drift" -eq 1 ]]; then
     die "Addon layout in $(c_repo "$repo_name") changed upstream. Run $(c_hint "mash refresh $repo_name") to re-detect."
   fi
+
+  sync_repo_addons_if_copied "$repo_name"
 
   if [[ "$old_sha" == "$new_sha" ]]; then
     log_info "$(c_repo "$repo_name") is up to date ($(c_dim "$new_sha"))."
@@ -1963,8 +2002,8 @@ cmd_refresh() {
   for ((i = 0; i < ${#removed_targets[@]}; i++)); do
     old_target="${removed_targets[$i]}"
     if is_mash_symlink "$old_target"; then
-      old_source="$(readlink "$old_target")"
-      if rm -f "$old_target"; then
+      old_source="$(readlink "$old_target" 2>/dev/null || cat "$old_target/.mash_managed" 2>/dev/null || true)"
+      if rm -rf "$old_target"; then
         removed_done+=("$old_target")
         removed_done_sources+=("$old_source")
       else
@@ -1977,11 +2016,9 @@ cmd_refresh() {
   if [[ "$rollback" -eq 0 ]]; then
     for ((i = 0; i < ${#new_targets[@]}; i++)); do
       target="${new_targets[$i]}"
-      # Preflight guaranteed any existing symlink here is mash-managed, so a
-      # bare `-L` check is enough to detect a repoint we may need to roll back.
-      if [[ -L "$target" ]]; then
+      if [[ -L "$target" || -d "$target" ]]; then
         repointed_targets+=("$target")
-        repointed_sources+=("$(readlink "$target")")
+        repointed_sources+=("$(readlink "$target" 2>/dev/null || cat "$target/.mash_managed" 2>/dev/null || true)")
       fi
       if install_symlink_safe "${new_sources[$i]}" "$target"; then
         installed_done+=("$target")
@@ -1995,13 +2032,13 @@ cmd_refresh() {
   if [[ "$rollback" -eq 1 ]]; then
     local rb
     for rb in ${installed_done[@]+"${installed_done[@]}"}; do
-      rm -f "$rb"
+      rm -rf "$rb"
     done
     for ((i = 0; i < ${#repointed_targets[@]}; i++)); do
-      ln -sfn "${repointed_sources[$i]}" "${repointed_targets[$i]}"
+      install_symlink_safe "${repointed_sources[$i]}" "${repointed_targets[$i]}"
     done
     for ((i = 0; i < ${#removed_done[@]}; i++)); do
-      ln -sfn "${removed_done_sources[$i]}" "${removed_done[$i]}"
+      install_symlink_safe "${removed_done_sources[$i]}" "${removed_done[$i]}"
     done
     die "Failed to refresh symlinks for $(c_repo "$name") (rolled back)."
   fi
@@ -2122,7 +2159,7 @@ cmd_remove() {
     [[ -z "$addon_name" ]] && continue
     target="$addons_dir/$addon_name"
     if is_mash_symlink "$target"; then
-      rm -f "$target"
+      rm -rf "$target"
     fi
   done < <(read_repo_addons "$section")
 
